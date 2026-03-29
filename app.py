@@ -667,4 +667,14 @@ if uploaded_file is not None:
                 for index, row in result_df.iterrows():
                     text_output += f"{row['번호']}. {row['이름']}\n"
                     text_output += f"- 첫번째 테이블: {row['1라운드 테이블']}\n"
-                    text_output += f"- 두번째 테이블: {row['2라운드 테이
+                    text_output += f"- 두번째 테이블: {row['2라운드 테이블']}\n"
+                    text_output += f"- 세번째 테이블: {row['3라운드 테이블']}\n\n"
+                st.text_area("아래 내용을 전체 복사하세요.", text_output, height=300)
+
+                st.write("---")
+                if st.button("🔄 전체 데이터 초기화 및 다시 시작하기", type="primary"):
+                    for key in list(st.session_state.keys()):
+                        if key != 'authenticated':
+                            del st.session_state[key]
+                    st.session_state['uploader_key'] = str(uuid.uuid4())
+                    st.rerun()
