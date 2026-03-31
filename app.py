@@ -7,6 +7,51 @@ import uuid
 st.set_page_config(page_title="청취담 연합파티 매칭", page_icon="🍻", layout="wide")
 
 # ==========================================
+# [데이터 정규화 함수] 성별, 대학, 학년 쓰레기값 방어
+# ==========================================
+def normalize_gender(x):
+    x = str(x).strip().lower()
+    if '남' in x or x in ['m', 'male', '남자']: return '남'
+    if '여' in x or x in ['f', 'female', '여자', 'w', 'woman', 'women']: return '여'
+    return '미기재'
+
+def normalize_univ(x):
+    x = str(x).strip()
+    if not x or x.lower() == 'nan': return '미기재'
+    if '교통' in x: return '교통대'
+    if '건국' in x: return '건국대'
+    return x # N개 대학 동적 분산을 위해 타 대학(충북대 등)은 이름 그대로 유지
+
+def normalize_grade(x):
+    x = str(x).strip().replace('학년', '').replace('년', '').strip()
+    return x if x not in ['', 'nan', 'None'] else '미기재'
+
+# ==========================================
+# [스마트 헤더 자동 탐색] Garbage Rows 무시 (인덱스 버그 수정)
+# ==========================================
+def auto_find_header(df):
+    def has_required_cols(cols):
+        cols_str = "".join(str(c).replace(' ', '') for c in cols)
+        return '이름' in cols_str and '성별' in cols_str
+
+    if has_required_cols(df.columns):
+        return df
+        
+    header_pos = -1
+    for pos, (idx, row) in enumerate(df.iterrows()):
+        if has_required_cols(row.values):
+            header_pos = pos
+            break
+            
+    if header_pos != -1:
+        df.columns = df.iloc[header_pos].values
+        df = df.iloc[header_pos + 1:].reset_index(drop=True)
+        df.columns = [str(c) if pd.notna(c) else f"Unnamed_{i}" for i, c in enumerate(df.columns)]
+        
+    return df
+# ==========================================
+
+# ==========================================
 # [보안] 관리자 로그인 시스템 및 캐시 키 초기화
 # ==========================================
 if "authenticated" not in st.session_state:
@@ -39,8 +84,21 @@ st.sidebar.header("⚙️ 파티 설정")
 party_capacity = st.sidebar.number_input("이번 파티 참가 정원 (명)", min_value=4, value=48, step=1)
 table_count = st.sidebar.number_input("준비된 테이블 개수", min_value=1, value=12, step=1)
 
+# --- 전략적 셔플 (Strategic Shuffle) 함수 ---
+def strategic_shuffle(people_list):
+    males = [p for p in people_list if p['성별'] == '남']
+    females = [p for p in people_list if p['성별'] == '여']
+    random.shuffle(males)
+    random.shuffle(females)
+    
+    result = []
+    for m, f in zip(males, females):
+        result.extend([m, f])
+    result.extend(males[len(females):] + females[len(males):])
+    return result
+
 # --- 2. 전체 스케줄 생성 알고리즘 ---
-def generate_full_schedule(people_list, num_tables, past_met_pairs=None, total_rounds=3, max_attempts=300, progress_bar=None, status_text=None):
+def generate_full_schedule(people_list, num_tables, past_met_pairs=None, total_rounds=3, max_attempts=1000, progress_bar=None, status_text=None):
     n = len(people_list)
     base_size = n // num_tables
     remainder = n % num_tables
@@ -66,77 +124,87 @@ def generate_full_schedule(people_list, num_tables, past_met_pairs=None, total_r
     best_all_rounds = []
     global_min_penalty = float('inf')
 
+    past_adj = {p['고유ID']: set() for p in people_list}
+    if past_met_pairs:
+        for p1, p2 in past_met_pairs:
+            if p1 in past_adj and p2 in past_adj:
+                past_adj[p1].add(p2)
+                past_adj[p2].add(p1)
+
     for attempt in range(max_attempts): 
-        past_met_pairs_set = set(past_met_pairs) if past_met_pairs else set()
-        current_met_pairs = set()
+        current_adj = {p['고유ID']: set() for p in people_list}
         person_visited_tables = {p['고유ID']: set() for p in people_list}
         current_all_rounds = []
         total_penalty = 0
 
         for r in range(total_rounds):
-            unseated = people_list.copy()
-            random.shuffle(unseated)
+            unseated = strategic_shuffle(people_list.copy())
             round_tables = [[] for _ in range(num_tables)]
 
             for t_idx, t_size in enumerate(table_sizes):
                 for _ in range(t_size):
                     if not unseated: break
+                    
+                    current_t_w = sum(1 for x in round_tables[t_idx] if x['성별'] == '여')
+                    current_t_m = sum(1 for x in round_tables[t_idx] if x['성별'] == '남')
+                    current_t_e = sum(1 for x in round_tables[t_idx] if 'E' in str(x.get('MBTI', '')).upper())
+                    current_t_univs = {u: sum(1 for x in round_tables[t_idx] if x['재학중인대학'] == u) for u in unique_univs}
+                    
+                    unseated_w = sum(1 for x in unseated if x['성별'] == '여')
+                    unseated_m = sum(1 for x in unseated if x['성별'] == '남')
+                    unseated_e = sum(1 for x in unseated if 'E' in str(x.get('MBTI', '')).upper())
+                    unseated_univs = {u: sum(1 for x in unseated if x['재학중인대학'] == u) for u in unique_univs}
+                    
+                    tables_needing_w = sum(1 for t in round_tables if sum(1 for x in t if x['성별'] == '여') < min_w)
+                    tables_needing_m = sum(1 for t in round_tables if sum(1 for x in t if x['성별'] == '남') < min_m)
+                    tables_needing_e = sum(1 for t in round_tables if sum(1 for x in t if 'E' in str(x.get('MBTI', '')).upper()) < min_e)
+                    tables_needing_univs = {u: sum(1 for t in round_tables if sum(1 for x in t if x['재학중인대학'] == u) < min_u[u]) for u in unique_univs}
+
                     best_person = None
                     min_p = float('inf')
+                    
                     for p in unseated:
                         p_penalty = 0
+                        p_uid = p['고유ID']
+                        p_sex = p['성별']
+                        p_univ = p['재학중인대학']
+                        p_mbti_is_e = 'E' in str(p.get('MBTI', '')).upper()
                         
                         for seated in round_tables[t_idx]:
-                            pair = tuple(sorted([p['고유ID'], seated['고유ID']]))
+                            s_uid = seated['고유ID']
                             
-                            if pair in current_met_pairs:
+                            if s_uid in current_adj[p_uid]:
                                 p_penalty += 100000 
-                            elif pair in past_met_pairs_set and p['성별'] != seated['성별']:
+                            elif s_uid in past_adj[p_uid] and p_sex != seated['성별']:
                                 p_penalty += 50000 
                                     
                             if p.get('학과') and seated.get('학과'):
-                                if p['학과'] != '미기재' and p['재학중인대학'] == seated['재학중인대학'] and p['학과'] == seated['학과']:
+                                if p['학과'] != '미기재' and p_univ == seated['재학중인대학'] and p['학과'] == seated['학과']:
                                     p_penalty += 20000
                                     
-                        if t_idx in person_visited_tables[p['고유ID']]: 
+                        if t_idx in person_visited_tables[p_uid]: 
                             p_penalty += 8000
                             
-                        temp_w = sum(1 for x in round_tables[t_idx] if x['성별'] == '여') + (1 if p['성별'] == '여' else 0)
-                        temp_m = sum(1 for x in round_tables[t_idx] if x['성별'] == '남') + (1 if p['성별'] == '남' else 0)
-                        
-                        temp_univ_counts = {u: sum(1 for x in round_tables[t_idx] if x['재학중인대학'] == u) for u in unique_univs}
-                        temp_univ_counts[p['재학중인대학']] += 1
+                        temp_w = current_t_w + (1 if p_sex == '여' else 0)
+                        temp_m = current_t_m + (1 if p_sex == '남' else 0)
+                        temp_u_count = current_t_univs[p_univ] + 1
 
                         if temp_w > max_w: p_penalty += 100000
                         if temp_m > max_m: p_penalty += 100000
                         
-                        if p['성별'] == '여':
-                            unseated_w = sum(1 for x in unseated if x['성별'] == '여')
-                            tables_needing_w = sum(1 for t in round_tables if sum(1 for x in t if x['성별'] == '여') < min_w)
+                        if p_sex == '여':
                             if (temp_w - 1) >= min_w and unseated_w <= tables_needing_w: p_penalty += 100000
-                        elif p['성별'] == '남':
-                            unseated_m = sum(1 for x in unseated if x['성별'] == '남')
-                            tables_needing_m = sum(1 for t in round_tables if sum(1 for x in t if x['성별'] == '남') < min_m)
+                        elif p_sex == '남':
                             if (temp_m - 1) >= min_m and unseated_m <= tables_needing_m: p_penalty += 100000
                             
-                        for u in unique_univs:
-                            if temp_univ_counts[u] > max_u[u]: p_penalty += 30000
-                            
-                        curr_u = p['재학중인대학']
-                        unseated_curr_u = sum(1 for x in unseated if x['재학중인대학'] == curr_u)
-                        tables_needing_curr_u = sum(1 for t in round_tables if sum(1 for x in t if x['재학중인대학'] == curr_u) < min_u[curr_u])
-                        if (temp_univ_counts[curr_u] - 1) >= min_u[curr_u] and unseated_curr_u <= tables_needing_curr_u:
+                        if temp_u_count > max_u[p_univ]: p_penalty += 30000
+                        if (temp_u_count - 1) >= min_u[p_univ] and unseated_univs[p_univ] <= tables_needing_univs[p_univ]:
                             p_penalty += 30000
 
-                        if 'E' in str(p.get('MBTI', '')).upper():
-                            temp_e = sum(1 for x in round_tables[t_idx] if 'E' in str(x.get('MBTI', '')).upper()) + 1
-                            if temp_e > max_e: 
-                                p_penalty += 15000 
-                                
-                            unseated_e = sum(1 for x in unseated if 'E' in str(x.get('MBTI', '')).upper())
-                            tables_needing_e = sum(1 for t in round_tables if sum(1 for x in t if 'E' in str(x.get('MBTI', '')).upper()) < min_e)
-                            if (temp_e - 1) >= min_e and unseated_e <= tables_needing_e: 
-                                p_penalty += 15000 
+                        if p_mbti_is_e:
+                            temp_e = current_t_e + 1
+                            if temp_e > max_e: p_penalty += 15000 
+                            if (temp_e - 1) >= min_e and unseated_e <= tables_needing_e: p_penalty += 15000 
                             
                         if p_penalty < min_p:
                             min_p = p_penalty
@@ -153,8 +221,9 @@ def generate_full_schedule(people_list, num_tables, past_met_pairs=None, total_r
             for table in round_tables:
                 for i in range(len(table)):
                     for j in range(i + 1, len(table)):
-                        pair = tuple(sorted([table[i]['고유ID'], table[j]['고유ID']]))
-                        current_met_pairs.add(pair)
+                        u1, u2 = table[i]['고유ID'], table[j]['고유ID']
+                        current_adj[u1].add(u2)
+                        current_adj[u2].add(u1)
                         
         if total_penalty < global_min_penalty:
             global_min_penalty = total_penalty
@@ -163,7 +232,7 @@ def generate_full_schedule(people_list, num_tables, past_met_pairs=None, total_r
         if progress_bar and status_text:
             percent_complete = int(((attempt + 1) / max_attempts) * 100)
             progress_bar.progress(percent_complete)
-            status_text.markdown(f"**⏳ 완벽한 배치를 찾는 중... (시뮬레이션: {attempt + 1}/{max_attempts}회)** \n👉 현재까지 찾은 가장 완벽한 배치 점수: `{global_min_penalty}`점 (0점이 무결점)")
+            status_text.markdown(f"**⏳ 지능적 셔플을 통한 최적 해 탐색 중... (시뮬레이션: {attempt + 1}/{max_attempts}회)** \n👉 현재 최저 패널티: `{global_min_penalty}`점 (0점이 무결점)")
 
         if global_min_penalty == 0: 
             if status_text:
@@ -193,6 +262,8 @@ if uploaded_file is not None:
     else:
         df = pd.read_excel(uploaded_file)
         
+    df = auto_find_header(df)
+        
     cleaned_columns = {}
     for col in df.columns:
         clean_name = str(col).replace('(*)', '').replace(' ', '').strip()
@@ -205,7 +276,6 @@ if uploaded_file is not None:
     for keyword in target_keywords:
         matched_col = next((col for col in df.columns if keyword.lower() in str(col).lower()), None)
         if matched_col:
-            # [수정] 연락처나 신규 등의 키워드는 원래 이름과 같아도 무조건 표준이름으로 변경하도록 로직 강화
             if keyword == '신규': rename_dict[matched_col] = '참여이력'
             elif keyword == '연락처': rename_dict[matched_col] = '전화번호'
             elif keyword.lower() == 'mbti': rename_dict[matched_col] = 'MBTI'
@@ -218,45 +288,54 @@ if uploaded_file is not None:
         df = df.rename(columns=rename_dict)
 
     if not {'이름', '성별', '재학중인대학'}.issubset(df.columns):
-        st.error("⚠️ 파일 첫 줄에 최소한 '이름', '성별', '재학중인대학' (또는 소속학교/학교) 관련 단어가 포함되어 있는지 확인해주세요!")
+        st.error("⚠️ 파일에 '이름', '성별', '재학중인대학' (또는 소속학교/학교) 관련 단어가 포함되어 있는지 확인해주세요!")
     else:
-        df['성별'] = df['성별'].astype(str).apply(lambda x: '남' if '남' in x else ('여' if '여' in x else x))
-        df['재학중인대학'] = df['재학중인대학'].astype(str).apply(lambda x: '교통대' if '교통' in x else ('건국대' if '건국' in x else x))
+        # 보이지 않는 빈 줄(Ghost Rows) 삭제
+        df = df.dropna(subset=['이름'])
+        df = df[df['이름'].astype(str).str.strip() != '']
+        
+        # 성별 & 대학 스마트 정규화 및 에러 알림
+        df['성별'] = df['성별'].apply(normalize_gender)
+        df_invalid_g = df[df['성별'] == '미기재']
+        if len(df_invalid_g) > 0:
+            st.warning(f"⚠️ 성별을 인식할 수 없는 {len(df_invalid_g)}명이 선발 풀에서 자동 제외됩니다: {', '.join(df_invalid_g['이름'].astype(str).tolist())}")
+        df = df[df['성별'].isin(['남', '여'])]
+        
+        df['재학중인대학'] = df['재학중인대학'].apply(normalize_univ)
+        df_invalid_u = df[df['재학중인대학'] == '미기재']
+        if len(df_invalid_u) > 0:
+            st.warning(f"⚠️ 대학 정보를 인식할 수 없는 {len(df_invalid_u)}명이 선발 풀에서 자동 제외됩니다: {', '.join(df_invalid_u['이름'].astype(str).tolist())}")
+        df = df[df['재학중인대학'] != '미기재']
         
         has_dept = '학과' in df.columns
-        if has_dept:
-            df['학과'] = df['학과'].fillna('미기재')
-        else:
-            df['학과'] = '미기재'
+        if has_dept: df['학과'] = df['학과'].fillna('미기재')
+        else: df['학과'] = '미기재'
             
         has_grade = '학년' in df.columns
-        if has_grade:
-            df['학년'] = df['학년'].astype(str).replace('nan', '미기재')
-        else:
-            df['학년'] = '미기재'
+        if has_grade: df['학년'] = df['학년'].apply(normalize_grade)
+        else: df['학년'] = '미기재'
             
-        if '참여이력' not in df.columns:
-            df['참여이력'] = '신규' 
-        else:
-            df['참여이력'] = df['참여이력'].astype(str).apply(lambda x: '크루' if '크루' in x or '기존' in x else '신규')
+        if '참여이력' not in df.columns: df['참여이력'] = '신규' 
+        else: df['참여이력'] = df['참여이력'].astype(str).apply(lambda x: '크루' if '크루' in x or '기존' in x else '신규')
             
         has_phone = '전화번호' in df.columns
-        if has_phone:
-            df['전화번호'] = df['전화번호'].astype(str).replace('nan', '미기재')
-        else:
-            df['전화번호'] = '미기재'
+        if has_phone: df['전화번호'] = df['전화번호'].astype(str).replace('nan', '미기재')
+        else: df['전화번호'] = '미기재'
             
         has_mbti = 'MBTI' in df.columns
-        if has_mbti:
-            df['MBTI'] = df['MBTI'].astype(str).replace('nan', '미기재')
-        else:
-            df['MBTI'] = '미기재'
+        if has_mbti: df['MBTI'] = df['MBTI'].astype(str).replace('nan', '미기재')
+        else: df['MBTI'] = '미기재'
         
         total_count = len(df)
         total_m_count = len(df[df['성별'] == '남'])
         total_w_count = len(df[df['성별'] == '여'])
+        total_new_count = len(df[df['참여이력'] == '신규'])
+        total_crew_count = len(df[df['참여이력'] == '크루'])
+        
         ratio_m = (total_m_count / total_count) * 100 if total_count > 0 else 0
         ratio_w = (total_w_count / total_count) * 100 if total_count > 0 else 0
+        ratio_new = (total_new_count / total_count) * 100 if total_count > 0 else 0
+        ratio_crew = (total_crew_count / total_count) * 100 if total_count > 0 else 0
         
         total_sch_a_count = len(df[df['재학중인대학'] == '교통대'])
         total_sch_b_count = len(df[df['재학중인대학'] == '건국대'])
@@ -266,6 +345,7 @@ if uploaded_file is not None:
         st.write(f"✅ **총 신청자 수: {total_count}명** (설정된 파티 정원: {party_capacity}명)")
         st.info(f"📊 **신청자 성비:** 👨 남성 {total_m_count}명 ({ratio_m:.1f}%) / 👩‍🦰 여성 {total_w_count}명 ({ratio_w:.1f}%)")
         st.info(f"🏫 **대학 비율:** 🚆 교통대 {total_sch_a_count}명 ({ratio_sch_a:.1f}%) / 🐂 건국대 {total_sch_b_count}명 ({ratio_sch_b:.1f}%)")
+        st.info(f"👥 **참여이력 비율:** 🌟 신규 {total_new_count}명 ({ratio_new:.1f}%) / 🎖️ 기존(크루) {total_crew_count}명 ({ratio_crew:.1f}%)")
         
         if has_grade:
             grade_counts = df[df['학년'] != '미기재']['학년'].value_counts().sort_index()
@@ -279,14 +359,20 @@ if uploaded_file is not None:
             if past_waitlist_file.name.endswith('.csv'): df_past = pd.read_csv(past_waitlist_file)
             else: df_past = pd.read_excel(past_waitlist_file)
             try:
+                df_past = auto_find_header(df_past)
                 cleaned_past_cols = {col: str(col).replace('(*)', '').replace(' ', '').strip() for col in df_past.columns}
                 df_past = df_past.rename(columns=cleaned_past_cols)
 
                 if '소속학교' in df_past.columns and '재학중인대학' not in df_past.columns: df_past.rename(columns={'소속학교': '재학중인대학'}, inplace=True)
                 if '학교' in df_past.columns and '재학중인대학' not in df_past.columns: df_past.rename(columns={'학교': '재학중인대학'}, inplace=True)
                 
-                df_past['성별'] = df_past['성별'].astype(str).apply(lambda x: '남' if '남' in x else ('여' if '여' in x else x))
-                df_past['재학중인대학'] = df_past['재학중인대학'].astype(str).apply(lambda x: '교통대' if '교통' in x else ('건국대' if '건국' in x else x))
+                # 과거 대기자 명단에도 성별/대학/학년 정규화 적용 
+                if '성별' in df_past.columns: df_past['성별'] = df_past['성별'].apply(normalize_gender)
+                if '재학중인대학' in df_past.columns: df_past['재학중인대학'] = df_past['재학중인대학'].apply(normalize_univ)
+                if '학년' in df_past.columns: df_past['학년'] = df_past['학년'].apply(normalize_grade)
+                
+                df_past = df_past[(df_past['성별'].isin(['남', '여'])) & (df_past['재학중인대학'] != '미기재')]
+                
                 df_past['매칭키'] = df_past['이름'].astype(str) + df_past['성별'].astype(str) + df_past['재학중인대학'].astype(str)
                 past_keys = set(df_past['매칭키'].dropna().tolist())
                 st.success(f"✅ 저번 대기자 {len(past_keys)}명을 성공적으로 인식했습니다. (우선 선발 대상)")
@@ -295,7 +381,7 @@ if uploaded_file is not None:
         
         st.write("---")
         if st.button("🚀 1단계: 참가 정원에 맞춰 최종 참가자/대기자 선발", use_container_width=True):
-            with st.spinner("정원과 성비에 맞춰 최적의 참가자를 선발 중입니다..."):
+            with st.spinner("정원, 성비, 소수 대학 분배(Water-filling) 조건을 맞춰 최적의 참가자를 선발 중입니다..."):
                 df['우선순위'] = df['매칭키'].apply(lambda x: True if x in past_keys else False)
                 
                 df_m = df[df['성별'] == '남'].copy()
@@ -329,23 +415,66 @@ if uploaded_file is not None:
                     if remaining_target <= 0:
                         return selected_priority, df_pool.drop(selected_priority.index)
                         
-                    df_new = df_normal[df_normal['참여이력'] == '신규']
-                    df_crew = df_normal[df_normal['참여이력'] == '크루']
+                    univs = df_normal['재학중인대학'].unique()
+                    univ_counts = {u: len(df_normal[df_normal['재학중인대학'] == u]) for u in univs}
                     
-                    target_new = remaining_target // 2 + remaining_target % 2 
-                    target_crew = remaining_target // 2
+                    allocation = {u: 0 for u in univs}
+                    curr_target = remaining_target
+                    active_univs = [u for u in univs if univ_counts[u] > 0]
                     
-                    if len(df_new) < target_new:
-                        target_crew += (target_new - len(df_new))
-                        target_new = len(df_new)
-                    elif len(df_crew) < target_crew:
-                        target_new += (target_crew - len(df_crew))
-                        target_crew = len(df_crew)
+                    while curr_target > 0 and active_univs:
+                        fair_share = curr_target // len(active_univs)
+                        minorities = [u for u in active_univs if univ_counts[u] <= fair_share]
                         
-                    selected_new = safe_sample(df_new, target_new)
-                    selected_crew = safe_sample(df_crew, target_crew)
-                    
-                    final_selected = pd.concat([selected_priority, selected_new, selected_crew])
+                        if minorities:
+                            for u in minorities:
+                                allocation[u] += univ_counts[u]
+                                curr_target -= univ_counts[u]
+                                active_univs.remove(u)
+                        else:
+                            if not active_univs: break
+                            for u in active_univs:
+                                allocation[u] += fair_share
+                                univ_counts[u] -= fair_share
+                                curr_target -= fair_share
+                            
+                            if curr_target > 0:
+                                lucky = random.sample(active_univs, curr_target)
+                                for u in lucky:
+                                    allocation[u] += 1
+                                    univ_counts[u] -= 1
+                                curr_target = 0
+                            break
+                            
+                    selected_list = []
+                    for u in univs:
+                        alloc = allocation[u]
+                        if alloc <= 0: continue
+                        
+                        df_u = df_normal[df_normal['재학중인대학'] == u]
+                        df_u_new = df_u[df_u['참여이력'] == '신규']
+                        df_u_crew = df_u[df_u['참여이력'] == '크루']
+                        
+                        target_new = alloc // 2 + alloc % 2 
+                        target_crew = alloc // 2
+                        
+                        if len(df_u_new) < target_new:
+                            target_crew += (target_new - len(df_u_new))
+                            target_new = len(df_u_new)
+                        elif len(df_u_crew) < target_crew:
+                            target_new += (target_crew - len(df_u_crew))
+                            target_crew = len(df_u_crew)
+                            
+                        sel_new = safe_sample(df_u_new, target_new)
+                        sel_crew = safe_sample(df_u_crew, target_crew)
+                        selected_list.append(pd.concat([sel_new, sel_crew]))
+                        
+                    if selected_list:
+                        final_normal_selected = pd.concat(selected_list)
+                    else:
+                        final_normal_selected = pd.DataFrame(columns=df_pool.columns)
+                        
+                    final_selected = pd.concat([selected_priority, final_normal_selected])
                     final_waitlisted = df_pool.drop(final_selected.index)
                     return final_selected, final_waitlisted
 
@@ -354,6 +483,8 @@ if uploaded_file is not None:
                 
                 final_selected_df = pd.concat([selected_m, selected_w]).sample(frac=1).reset_index(drop=True)
                 final_waitlist_df = pd.concat([waitlist_m, waitlist_w]).sample(frac=1).reset_index(drop=True)
+                
+                final_selected_df['고유ID'] = [f"{row['이름']}_{i}" for i, row in final_selected_df.iterrows()]
                 
                 st.session_state['selected_df'] = final_selected_df
                 st.session_state['waitlist_df'] = final_waitlist_df
@@ -373,7 +504,7 @@ if uploaded_file is not None:
             
             crew_sel = len(sel_df[sel_df['참여이력'] == '크루'])
             new_sel = len(sel_df[sel_df['참여이력'] == '신규'])
-            st.info(f"👥 **참여이력 비율:** 🌟 신규 {new_sel}명 / 🎖️ 기존(크루) {crew_sel}명")
+            st.info(f"👥 **선발된 인원 참여이력 비율:** 🌟 신규 {new_sel}명 / 🎖️ 기존(크루) {crew_sel}명")
             
             st.write("### ✅ 최종 참가 확정 명단")
             st.dataframe(sel_df.drop(columns=['매칭키', '우선순위', '고유ID'], errors='ignore'), hide_index=True, use_container_width=True)
@@ -404,8 +535,7 @@ if uploaded_file is not None:
                 sel_list = st.session_state['selected_df'].to_dict('records')
                 
                 key_to_uid = {}
-                for idx, p in enumerate(sel_list): 
-                    p['고유ID'] = f"{p['이름']}_{idx}"
+                for p in sel_list: 
                     matching_key = f"{p['이름']}_{p['재학중인대학']}_{p['성별']}"
                     key_to_uid[matching_key] = p['고유ID']
                     
@@ -414,6 +544,8 @@ if uploaded_file is not None:
                     try:
                         df_ps = pd.read_csv(past_seat_file) if past_seat_file.name.endswith('.csv') else pd.read_excel(past_seat_file)
                         
+                        df_ps = auto_find_header(df_ps)
+                        
                         cleaned_past_cols_ps = {col: str(col).replace('(*)', '').replace(' ', '').strip() for col in df_ps.columns}
                         df_ps = df_ps.rename(columns=cleaned_past_cols_ps)
 
@@ -421,6 +553,10 @@ if uploaded_file is not None:
                             df_ps.rename(columns={'학교': '재학중인대학'}, inplace=True)
                         elif '소속학교' in df_ps.columns and '재학중인대학' not in df_ps.columns:
                             df_ps.rename(columns={'소속학교': '재학중인대학'}, inplace=True)
+                            
+                        if '성별' in df_ps.columns: df_ps['성별'] = df_ps['성별'].apply(normalize_gender)
+                        if '재학중인대학' in df_ps.columns: df_ps['재학중인대학'] = df_ps['재학중인대학'].apply(normalize_univ)
+                        if '학년' in df_ps.columns: df_ps['학년'] = df_ps['학년'].apply(normalize_grade)
                             
                         round_cols = [c for c in df_ps.columns if '라운드' in c or 'R' in c]
                         df_ps['매칭키'] = df_ps['이름'].astype(str) + "_" + df_ps['재학중인대학'].astype(str) + "_" + df_ps['성별'].astype(str)
@@ -442,7 +578,7 @@ if uploaded_file is not None:
                     sel_list, 
                     table_count, 
                     past_met_pairs=past_met_pairs,
-                    max_attempts=300, 
+                    max_attempts=1000, 
                     progress_bar=progress_bar, 
                     status_text=status_text
                 )
@@ -457,9 +593,6 @@ if uploaded_file is not None:
                 final_score = st.session_state['final_score']
                 past_met_pairs = st.session_state['past_met_pairs']
                 sel_list = st.session_state['selected_df'].to_dict('records')
-                
-                for idx, p in enumerate(sel_list): 
-                    p['고유ID'] = f"{p['이름']}_{idx}"
 
                 st.success(f"🎉 파티 전체 스케줄 배치가 완료되었습니다! (최종 패널티 점수: {final_score}점)")
                     
@@ -475,6 +608,8 @@ if uploaded_file is not None:
                 skewed_univ_tables = []
                 same_major_tables = []
                 skewed_mbti_tables = [] 
+                underfilled_tables = []
+                
                 ghost_meets = 0 
                 ghost_details = []
                 
@@ -492,8 +627,14 @@ if uploaded_file is not None:
                 min_e_sel = total_e_sel // table_count if table_count else 0
                 max_e_sel = (total_e_sel + table_count - 1) // table_count if table_count else 0
 
+                base_table_size = len(sel_list) // table_count if table_count else 0
+
                 for r_idx, round_tables in enumerate(all_rounds_data):
                     for t_idx, table in enumerate(round_tables):
+                        
+                        if len(table) < base_table_size:
+                            underfilled_tables.append(f"{r_idx+1}R {t_idx+1}번 (현재 {len(table)}명)")
+
                         m_count = sum(1 for p in table if p['성별'] == '남')
                         w_count = sum(1 for p in table if p['성별'] == '여')
                         if m_count < min_m_sel or m_count > max_m_sel or w_count < min_w_sel or w_count > max_w_sel:
@@ -587,6 +728,8 @@ if uploaded_file is not None:
                     st.write(f"- **동일 학과 충돌:** {', '.join(same_major_tables) if same_major_tables else '없음 (완벽)'}")
                     st.write(f"- **MBTI(E) 분산실패:** {', '.join(skewed_mbti_tables) if skewed_mbti_tables else '없음 (완벽)'}")
                     st.write(f"- **지박령(동일 테이블 연속):** {', '.join(ghost_details) if ghost_details else '없음 (완벽)'}")
+                    if underfilled_tables:
+                        st.error(f"⚠️ **인원 미달 테이블 발생:** {', '.join(underfilled_tables)} (조건 충돌로 인한 강제 중단)")
 
                 st.write("---")
                 st.write("### 🗺️ 라운드별 테이블 배치도 (운영진용)")
@@ -665,7 +808,11 @@ if uploaded_file is not None:
                 st.write("### 📝 개별 안내용 텍스트 (복사해서 카톡 전송용)")
                 text_output = ""
                 for index, row in result_df.iterrows():
-                    text_output += f"{row['번호']}. {row['이름']}\n"
+                    phone_str = str(row.get('전화번호', ''))
+                    phone_digits = ''.join(filter(str.isdigit, phone_str))
+                    name_display = f"{row['이름']}({phone_digits[-4:]})" if len(phone_digits) >= 4 else f"{row['이름']}(번호없음)"
+                    
+                    text_output += f"{row['번호']}. {name_display}\n"
                     text_output += f"- 첫번째 테이블: {row['1라운드 테이블']}\n"
                     text_output += f"- 두번째 테이블: {row['2라운드 테이블']}\n"
                     text_output += f"- 세번째 테이블: {row['3라운드 테이블']}\n\n"
