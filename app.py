@@ -188,15 +188,12 @@ def generate_full_schedule(people_list, num_tables, past_met_pairs=None, total_r
                         temp_m = current_t_m + (1 if p_sex == '남' else 0)
                         temp_u_count = current_t_univs[p_univ] + 1
                         
-                        # [클로드 최적화 2] 3:1 이상의 '진짜' 불균형 위기일 때만 패널티 발동
                         temp_same_sex = temp_m if p_sex == '남' else temp_w
                         temp_opp_sex = temp_w if p_sex == '남' else temp_m
                         
-                        if disadvantage_history[p_uid] > 0 and temp_same_sex >= 3 and temp_opp_sex <= 1:
-                            if disadvantage_history[p_uid] == 1:
-                                p_penalty += 5000 * (temp_same_sex - temp_opp_sex)
-                            elif disadvantage_history[p_uid] >= 2:
-                                p_penalty += 50000 * (temp_same_sex - temp_opp_sex)
+                        # [통합된 단일 규칙] 3연속 소수 성비 테이블 배치 100,000점 절대 방어
+                        if disadvantage_history[p_uid] >= 2 and temp_same_sex >= 3 and temp_opp_sex <= 1:
+                            p_penalty += 100000
 
                         if temp_w > max_w: p_penalty += 100000
                         if temp_m > max_m: p_penalty += 100000
@@ -227,7 +224,6 @@ def generate_full_schedule(people_list, num_tables, past_met_pairs=None, total_r
                         
             current_all_rounds.append(round_tables)
             
-            # [클로드 최적화 1] 라운드 종료 후 불균형 피해 기록 및 인접 리스트 업데이트를 하나의 루프로 병합
             for table in round_tables:
                 t_w = sum(1 for x in table if x['성별'] == '여')
                 t_m = sum(1 for x in table if x['성별'] == '남')
@@ -236,13 +232,11 @@ def generate_full_schedule(people_list, num_tables, past_met_pairs=None, total_r
                     p_uid = table[i]['고유ID']
                     p_sex = table[i]['성별']
                     
-                    # 피해 기록 (클로드 최적화 3: 3:1 비율로 기준 명확화)
                     same_sex = t_w if p_sex == '여' else t_m
                     opp_sex = t_m if p_sex == '여' else t_w
                     if same_sex >= 3 and opp_sex <= 1:
                         disadvantage_history[p_uid] += 1
                         
-                    # 인접 리스트 업데이트
                     for j in range(i + 1, len(table)):
                         u2 = table[j]['고유ID']
                         current_adj[p_uid].add(u2)
@@ -725,7 +719,6 @@ if uploaded_file is not None:
                         ghost_meets += 1
                         ghost_details.append(f"{person['이름']} ({', '.join(ghost_info)})")
 
-                # 클로드 최적화 3 적용 (검증 리포트 기준 명확화)
                 continuous_imbalance_victims = []
                 for person in sel_list:
                     uid = person['고유ID']
