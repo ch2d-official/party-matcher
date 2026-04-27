@@ -98,7 +98,7 @@ def strategic_shuffle(people_list):
     return result
 
 # --- 2. 전체 스케줄 생성 알고리즘 ---
-def generate_full_schedule(people_list, num_tables, past_met_pairs=None, total_rounds=3, max_attempts=1000, progress_bar=None, status_text=None):
+def generate_full_schedule(people_list, num_tables, past_met_pairs=None, total_rounds=3, max_attempts=300, progress_bar=None, status_text=None):
     n = len(people_list)
     base_size = n // num_tables
     remainder = n % num_tables
@@ -144,25 +144,8 @@ def generate_full_schedule(people_list, num_tables, past_met_pairs=None, total_r
             for t_idx, t_size in enumerate(table_sizes):
                 for _ in range(t_size):
                     if not unseated: break
-                    
-                    current_t_w = sum(1 for x in round_tables[t_idx] if x['성별'] == '여')
-                    current_t_m = sum(1 for x in round_tables[t_idx] if x['성별'] == '남')
-                    current_t_e = sum(1 for x in round_tables[t_idx] if 'E' in str(x.get('MBTI', '')).upper())
-                    current_t_univs = {u: sum(1 for x in round_tables[t_idx] if x['재학중인대학'] == u) for u in unique_univs}
-                    
-                    unseated_w = sum(1 for x in unseated if x['성별'] == '여')
-                    unseated_m = sum(1 for x in unseated if x['성별'] == '남')
-                    unseated_e = sum(1 for x in unseated if 'E' in str(x.get('MBTI', '')).upper())
-                    unseated_univs = {u: sum(1 for x in unseated if x['재학중인대학'] == u) for u in unique_univs}
-                    
-                    tables_needing_w = sum(1 for t in round_tables if sum(1 for x in t if x['성별'] == '여') < min_w)
-                    tables_needing_m = sum(1 for t in round_tables if sum(1 for x in t if x['성별'] == '남') < min_m)
-                    tables_needing_e = sum(1 for t in round_tables if sum(1 for x in t if 'E' in str(x.get('MBTI', '')).upper()) < min_e)
-                    tables_needing_univs = {u: sum(1 for t in round_tables if sum(1 for x in t if x['재학중인대학'] == u) < min_u[u]) for u in unique_univs}
-
                     best_person = None
                     min_p = float('inf')
-                    
                     for p in unseated:
                         p_penalty = 0
                         p_uid = p['고유ID']
@@ -185,13 +168,47 @@ def generate_full_schedule(people_list, num_tables, past_met_pairs=None, total_r
                         if t_idx in person_visited_tables[p_uid]: 
                             p_penalty += 8000
                             
+                        temp_w = current_t_w = sum(1 for x in round_tables[t_idx] if x['성별'] == '여')
+                        temp_m = current_t_m = sum(1 for x in round_tables[t_idx] if x['성별'] == '남')
+                        current_t_e = sum(1 for x in round_tables[t_idx] if 'E' in str(x.get('MBTI', '')).upper())
+                        current_t_univs = {u: sum(1 for x in round_tables[t_idx] if x['재학중인대학'] == u) for u in unique_univs}
+                        
                         temp_w = current_t_w + (1 if p_sex == '여' else 0)
                         temp_m = current_t_m + (1 if p_sex == '남' else 0)
+
+                        # ==========================================
+                        # [신규 규칙] 성비 보장 (3연속 불균형 테이블 방지)
+                        # ==========================================
+                        if abs(temp_m - temp_w) > 1: # 3:1, 4:0 등 불균형 비율 감지
+                            past_unbalanced_count = 0
+                            for prev_round in current_all_rounds:
+                                for prev_table in prev_round:
+                                    if any(x['고유ID'] == p_uid for x in prev_table):
+                                        prev_m = sum(1 for x in prev_table if x['성별'] == '남')
+                                        prev_w = sum(1 for x in prev_table if x['성별'] == '여')
+                                        if abs(prev_m - prev_w) > 1:
+                                            past_unbalanced_count += 1
+                                        break
+                            # 앞선 라운드에서 모두 불균형을 겪었다면 절대 방어 (80,000점 부여)
+                            if past_unbalanced_count >= total_rounds - 1:
+                                p_penalty += 80000 
+                        # ==========================================
+
                         temp_u_count = current_t_univs[p_univ] + 1
 
                         if temp_w > max_w: p_penalty += 100000
                         if temp_m > max_m: p_penalty += 100000
                         
+                        unseated_w = sum(1 for x in unseated if x['성별'] == '여')
+                        unseated_m = sum(1 for x in unseated if x['성별'] == '남')
+                        unseated_e = sum(1 for x in unseated if 'E' in str(x.get('MBTI', '')).upper())
+                        unseated_univs = {u: sum(1 for x in unseated if x['재학중인대학'] == u) for u in unique_univs}
+                        
+                        tables_needing_w = sum(1 for t in round_tables if sum(1 for x in t if x['성별'] == '여') < min_w)
+                        tables_needing_m = sum(1 for t in round_tables if sum(1 for x in t if x['성별'] == '남') < min_m)
+                        tables_needing_e = sum(1 for t in round_tables if sum(1 for x in t if 'E' in str(x.get('MBTI', '')).upper()) < min_e)
+                        tables_needing_univs = {u: sum(1 for t in round_tables if sum(1 for x in t if x['재학중인대학'] == u) < min_u[u]) for u in unique_univs}
+
                         if p_sex == '여':
                             if (temp_w - 1) >= min_w and unseated_w <= tables_needing_w: p_penalty += 100000
                         elif p_sex == '남':
@@ -578,7 +595,7 @@ if uploaded_file is not None:
                     sel_list, 
                     table_count, 
                     past_met_pairs=past_met_pairs,
-                    max_attempts=1000, 
+                    max_attempts=300, 
                     progress_bar=progress_bar, 
                     status_text=status_text
                 )
@@ -612,6 +629,7 @@ if uploaded_file is not None:
                 
                 ghost_meets = 0 
                 ghost_details = []
+                three_strike_unbalanced_details = [] # [신규] 3연속 불균형 희생자 추적
                 
                 all_met_current_report = set()
                 past_met_pairs_set_report = set(past_met_pairs) if past_met_pairs else set()
@@ -681,15 +699,26 @@ if uploaded_file is not None:
                                         
                                 all_met_current_report.add(pair)
                 
+                # [신규 추가 및 지박령 로직] 참가자별 불균형 연속 검사 및 지박령 검사
                 for person in sel_list:
                     uid = person['고유ID']
                     visited_tables = []
+                    unbalanced_times = 0 # 불균형 테이블 착석 횟수
+                    
                     for r_idx, round_tables in enumerate(all_rounds_data):
                         for t_idx, table in enumerate(round_tables):
                             if any(p['고유ID'] == uid for p in table):
                                 visited_tables.append(t_idx)
+                                # 착석한 테이블의 성비 확인
+                                m_c = sum(1 for x in table if x['성별'] == '남')
+                                w_c = sum(1 for x in table if x['성별'] == '여')
+                                if abs(m_c - w_c) > 1: # 3:1 비율 등 불균형
+                                    unbalanced_times += 1
                                 break
-                    
+                                
+                    if unbalanced_times >= len(all_rounds_data): # 3라운드 내내 불균형 테이블에 앉았다면
+                        three_strike_unbalanced_details.append(person['이름'])
+                        
                     table_to_rounds = {}
                     for r_idx, t_idx in enumerate(visited_tables):
                         if t_idx not in table_to_rounds:
@@ -711,12 +740,14 @@ if uploaded_file is not None:
                 col_r3.metric("🚨 이성 중복 만남(이전)", f"{dup_diff_past}건")
                 col_r4.metric("🚨 동성 중복 만남(이전)", f"{dup_same_past}건")
                 
-                col_r5, col_r6, col_r7, col_r8, col_r9 = st.columns(5)
+                # [수정] 5열에서 6열로 변경하여 지표 하나 추가
+                col_r5, col_r6, col_r7, col_r8, col_r9, col_r10 = st.columns(6)
                 col_r5.metric("⚖️ 성비 불균형", f"{len(skewed_gender_tables)}건")
                 col_r6.metric("🏫 대학 쏠림", f"{len(skewed_univ_tables)}건")
                 col_r7.metric("📚 학과 충돌", f"{len(same_major_tables)}건")
-                col_r8.metric("💬 MBTI 분산실패", f"{len(skewed_mbti_tables)}건")
+                col_r8.metric("💬 MBTI 쏠림", f"{len(skewed_mbti_tables)}건")
                 col_r9.metric("🪑 지박령 발생", f"{ghost_meets}명")
+                col_r10.metric("⚠️ 3연속 성비불균형", f"{len(three_strike_unbalanced_details)}명")
                 
                 with st.expander("🔍 상세 에러 테이블 확인하기 (클릭)"):
                     st.write(f"- **이성 중복 만남(당일) 발생:** {', '.join(dup_diff_curr_details) if dup_diff_curr_details else '없음 (완벽)'}")
@@ -728,6 +759,7 @@ if uploaded_file is not None:
                     st.write(f"- **동일 학과 충돌:** {', '.join(same_major_tables) if same_major_tables else '없음 (완벽)'}")
                     st.write(f"- **MBTI(E) 분산실패:** {', '.join(skewed_mbti_tables) if skewed_mbti_tables else '없음 (완벽)'}")
                     st.write(f"- **지박령(동일 테이블 연속):** {', '.join(ghost_details) if ghost_details else '없음 (완벽)'}")
+                    st.write(f"- **3연속 불균형테이블 배정 인원:** {', '.join(three_strike_unbalanced_details) if three_strike_unbalanced_details else '없음 (모두 1회 이상 2:2 테이블 경험!)'}")
                     if underfilled_tables:
                         st.error(f"⚠️ **인원 미달 테이블 발생:** {', '.join(underfilled_tables)} (조건 충돌로 인한 강제 중단)")
 
