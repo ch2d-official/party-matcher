@@ -132,7 +132,6 @@ def generate_full_schedule(people_list, num_tables, past_met_pairs=None, total_r
     for attempt in range(max_attempts): 
         current_adj = {p['고유ID']: set() for p in people_list}
         person_visited_tables = {p['고유ID']: set() for p in people_list}
-        # [신규규칙] 성비 불균형 피해 기록장
         disadvantage_history = {p['고유ID']: 0 for p in people_list} 
         current_all_rounds = []
         total_penalty = 0
@@ -189,15 +188,15 @@ def generate_full_schedule(people_list, num_tables, past_met_pairs=None, total_r
                         temp_m = current_t_m + (1 if p_sex == '남' else 0)
                         temp_u_count = current_t_univs[p_univ] + 1
                         
-                        # [신규규칙] 3연속 성비 불균형 피해 방지
+                        # [클로드 최적화 2] 3:1 이상의 '진짜' 불균형 위기일 때만 패널티 발동
                         temp_same_sex = temp_m if p_sex == '남' else temp_w
                         temp_opp_sex = temp_w if p_sex == '남' else temp_m
                         
-                        if disadvantage_history[p_uid] > 0 and (temp_same_sex > temp_opp_sex):
+                        if disadvantage_history[p_uid] > 0 and temp_same_sex >= 3 and temp_opp_sex <= 1:
                             if disadvantage_history[p_uid] == 1:
-                                p_penalty += 5000 * (temp_same_sex - temp_opp_sex) # 2연속 피해 가벼운 회피
+                                p_penalty += 5000 * (temp_same_sex - temp_opp_sex)
                             elif disadvantage_history[p_uid] >= 2:
-                                p_penalty += 50000 * (temp_same_sex - temp_opp_sex) # 3연속 피해 절대 방어
+                                p_penalty += 50000 * (temp_same_sex - temp_opp_sex)
 
                         if temp_w > max_w: p_penalty += 100000
                         if temp_m > max_m: p_penalty += 100000
@@ -228,22 +227,26 @@ def generate_full_schedule(people_list, num_tables, past_met_pairs=None, total_r
                         
             current_all_rounds.append(round_tables)
             
-            # [신규규칙] 라운드 종료 후 불균형 피해자 색출 및 업데이트
+            # [클로드 최적화 1] 라운드 종료 후 불균형 피해 기록 및 인접 리스트 업데이트를 하나의 루프로 병합
             for table in round_tables:
                 t_w = sum(1 for x in table if x['성별'] == '여')
                 t_m = sum(1 for x in table if x['성별'] == '남')
-                for seated_p in table:
-                    same_sex_count = t_w if seated_p['성별'] == '여' else t_m
-                    opp_sex_count = t_m if seated_p['성별'] == '여' else t_w
-                    if same_sex_count > opp_sex_count:
-                        disadvantage_history[seated_p['고유ID']] += 1
-            
-            for table in round_tables:
+                
                 for i in range(len(table)):
+                    p_uid = table[i]['고유ID']
+                    p_sex = table[i]['성별']
+                    
+                    # 피해 기록 (클로드 최적화 3: 3:1 비율로 기준 명확화)
+                    same_sex = t_w if p_sex == '여' else t_m
+                    opp_sex = t_m if p_sex == '여' else t_w
+                    if same_sex >= 3 and opp_sex <= 1:
+                        disadvantage_history[p_uid] += 1
+                        
+                    # 인접 리스트 업데이트
                     for j in range(i + 1, len(table)):
-                        u1, u2 = table[i]['고유ID'], table[j]['고유ID']
-                        current_adj[u1].add(u2)
-                        current_adj[u2].add(u1)
+                        u2 = table[j]['고유ID']
+                        current_adj[p_uid].add(u2)
+                        current_adj[u2].add(p_uid)
                         
         if total_penalty < global_min_penalty:
             global_min_penalty = total_penalty
@@ -722,7 +725,7 @@ if uploaded_file is not None:
                         ghost_meets += 1
                         ghost_details.append(f"{person['이름']} ({', '.join(ghost_info)})")
 
-                # [신규 추가] 3연속 불균형 피해자 추적
+                # 클로드 최적화 3 적용 (검증 리포트 기준 명확화)
                 continuous_imbalance_victims = []
                 for person in sel_list:
                     uid = person['고유ID']
@@ -734,7 +737,7 @@ if uploaded_file is not None:
                                 t_m = sum(1 for x in table if x['성별'] == '남')
                                 same_sex = t_w if person['성별'] == '여' else t_m
                                 opp_sex = t_m if person['성별'] == '여' else t_w
-                                if same_sex > opp_sex:
+                                if same_sex >= 3 and opp_sex <= 1:
                                     disadv_count += 1
                                 break
                     if disadv_count == 3:
