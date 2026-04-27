@@ -191,9 +191,15 @@ def generate_full_schedule(people_list, num_tables, past_met_pairs=None, total_r
                         temp_same_sex = temp_m if p_sex == '남' else temp_w
                         temp_opp_sex = temp_w if p_sex == '남' else temp_m
                         
-                        # [통합된 단일 규칙] 3연속 소수 성비 테이블 배치 100,000점 절대 방어
-                        if disadvantage_history[p_uid] >= 2 and temp_same_sex >= 3 and temp_opp_sex <= 1:
-                            p_penalty += 100000
+                        # [V13 핵심 버그 패치] 연대 책임 로직으로 3연속 피해 원천 차단
+                        if temp_same_sex >= 3 and temp_opp_sex <= 1:
+                            # 1. 자리에 앉는 본인이 피해자가 되는 경우
+                            if disadvantage_history[p_uid] >= 2:
+                                p_penalty += 100000
+                            # 2. 본인이 앉음으로써, 이미 앉아있는 사람을 피해자로 만드는 경우
+                            for seated in round_tables[t_idx]:
+                                if seated['성별'] == p_sex and disadvantage_history[seated['고유ID']] >= 2:
+                                    p_penalty += 100000
 
                         if temp_w > max_w: p_penalty += 100000
                         if temp_m > max_m: p_penalty += 100000
