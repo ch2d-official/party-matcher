@@ -180,7 +180,7 @@ def generate_full_schedule(people_list, num_tables, past_met_pairs=None, total_r
                         temp_same_sex = temp_m if p_sex == '남' else temp_w
                         temp_opp_sex = temp_w if p_sex == '남' else temp_m
 
-                        # [클로드 피드백 반영] 착석자 루프 단일화 및 연대책임 병합
+                        # 착석자 루프 단일화 및 연대책임 병합
                         for seated in round_tables[t_idx]:
                             s_uid = seated['고유ID']
                             
@@ -382,7 +382,7 @@ if uploaded_file is not None:
                 grade_stats_str = " / ".join([f"{grade} {count}명 ({(count/total_count)*100:.1f}%)" for grade, count in grade_counts.items()])
                 st.info(f"🎓 **학년별 비율:** {grade_stats_str}")
         
-        # [클로드 피드백 반영] 전화번호가 없는 사람은 0000 충돌 방지를 위해 기본 키로 분기
+        # 전화번호가 없는 사람은 0000 충돌 방지를 위해 기본 키로 분기
         df['매칭키_기본'] = df['이름'].astype(str) + df['성별'].astype(str) + df['재학중인대학'].astype(str)
         df['매칭키_상세'] = df['매칭키_기본'] + df['전화번호'].apply(extract_phone_last4)
         df['매칭키'] = df.apply(lambda r: r['매칭키_상세'] if extract_phone_last4(r['전화번호']) != '0000' else r['매칭키_기본'], axis=1)
@@ -784,7 +784,8 @@ if uploaded_file is not None:
                 col_r1.metric("🚨 이성 중복 만남(당일)", f"{dup_diff_curr}건")
                 col_r2.metric("🚨 동성 중복 만남(당일)", f"{dup_same_curr}건")
                 col_r3.metric("🚨 이성 중복 만남(이전)", f"{dup_diff_past}건")
-                col_r4.metric("🚨 동성 중복 만남(이전)", f"{dup_same_past}건")
+                # [클로드 피드백 반영] 동성 과거 만남은 치명적 에러(🚨)가 아닌 약한 견제(💛)로 UI 변경
+                col_r4.metric("💛 동성 재만남(이전)", f"{dup_same_past}건")
                 
                 col_r5, col_r6, col_r7, col_r8, col_r9, col_r10 = st.columns(6)
                 col_r5.metric("⚖️ 성비 불균형", f"{len(skewed_gender_tables)}건")
@@ -798,7 +799,8 @@ if uploaded_file is not None:
                     st.write(f"- **이성 중복 만남(당일) 발생:** {', '.join(dup_diff_curr_details) if dup_diff_curr_details else '없음 (완벽)'}")
                     st.write(f"- **동성 중복 만남(당일) 발생:** {', '.join(dup_same_curr_details) if dup_same_curr_details else '없음 (완벽)'}")
                     st.write(f"- **이성 중복 만남(이전) 발생:** {', '.join(dup_diff_past_details) if dup_diff_past_details else '없음 (완벽)'}")
-                    st.write(f"- **동성 중복 만남(이전) 발생:** {', '.join(dup_same_past_details) if dup_same_past_details else '없음 (완벽)'}")
+                    # [클로드 피드백 반영] 상세 에러 테이블 워딩 변경
+                    st.write(f"- **동성 재만남(이전, 약한 견제):** {', '.join(dup_same_past_details) if dup_same_past_details else '없음'}")
                     st.write(f"- **성비 불균형 (예: 4:0 쏠림):** {', '.join(skewed_gender_tables) if skewed_gender_tables else '없음 (완벽)'}")
                     st.write(f"- **대학 쏠림:** {', '.join(skewed_univ_tables) if skewed_univ_tables else '없음 (완벽)'}")
                     st.write(f"- **동일 학과 충돌:** {', '.join(same_major_tables) if same_major_tables else '없음 (완벽)'}")
