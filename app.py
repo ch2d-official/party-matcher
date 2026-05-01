@@ -7,7 +7,7 @@ import uuid
 st.set_page_config(page_title="청취담 연합파티 매칭", page_icon="🍻", layout="wide")
 
 # ==========================================
-# [데이터 정규화 함수] 성별, 대학, 학년 쓰레기값 방어
+# [데이터 정규화 함수] 성별, 대학, 학년, 전화번호 쓰레기값 방어
 # ==========================================
 def normalize_gender(x):
     x = str(x).strip().lower()
@@ -25,6 +25,10 @@ def normalize_univ(x):
 def normalize_grade(x):
     x = str(x).strip().replace('학년', '').replace('년', '').strip()
     return x if x not in ['', 'nan', 'None'] else '미기재'
+
+def extract_phone_last4(x):
+    digits = ''.join(filter(str.isdigit, str(x)))
+    return digits[-4:] if len(digits) >= 4 else '0000'
 
 # ==========================================
 # [스마트 헤더 자동 탐색] Garbage Rows 무시
@@ -169,37 +173,41 @@ def generate_full_schedule(people_list, num_tables, past_met_pairs=None, total_r
                         p_univ = p['재학중인대학']
                         p_mbti_is_e = 'E' in str(p.get('MBTI', '')).upper()
                         
-                        for seated in round_tables[t_idx]:
-                            s_uid = seated['고유ID']
-                            
-                            if s_uid in current_adj[p_uid]:
-                                p_penalty += 100000 
-                            elif s_uid in past_adj[p_uid] and p_sex != seated['성별']:
-                                p_penalty += 50000 
-                                    
-                            if p.get('학과') and seated.get('학과'):
-                                if p['학과'] != '미기재' and p_univ == seated['재학중인대학'] and p['학과'] == seated['학과']:
-                                    p_penalty += 20000
-                                    
-                        if t_idx in person_visited_tables[p_uid]: 
-                            p_penalty += 8000
-                            
                         temp_w = current_t_w + (1 if p_sex == '여' else 0)
                         temp_m = current_t_m + (1 if p_sex == '남' else 0)
                         temp_u_count = current_t_univs[p_univ] + 1
                         
                         temp_same_sex = temp_m if p_sex == '남' else temp_w
                         temp_opp_sex = temp_w if p_sex == '남' else temp_m
-                        
-                        # [V13 핵심 버그 패치] 연대 책임 로직으로 3연속 피해 원천 차단
+
+                        # [클로드 피드백 반영] 착석자 루프 단일화 및 연대책임 병합
+                        for seated in round_tables[t_idx]:
+                            s_uid = seated['고유ID']
+                            
+                            # 1. 중복 만남 패널티
+                            if s_uid in current_adj[p_uid]:
+                                p_penalty += 100000 
+                            elif s_uid in past_adj[p_uid]:
+                                # 과거 이성 5만점, 과거 동성 3천점(가벼운 견제)
+                                p_penalty += 50000 if p_sex != seated['성별'] else 3000
+                                    
+                            # 2. 학과 충돌 패널티
+                            if p.get('학과') and seated.get('학과'):
+                                if p['학과'] != '미기재' and p_univ == seated['재학중인대학'] and p['학과'] == seated['학과']:
+                                    p_penalty += 20000
+                                    
+                            # 3. 착석자 피해 방어 (3연속 소수 테이블 방지)
+                            if temp_same_sex >= 3 and temp_opp_sex <= 1:
+                                if seated['성별'] == p_sex and disadvantage_history[s_uid] >= 2:
+                                    p_penalty += 100000
+                                    
+                        # 본인 3연속 피해 방어 (루프 밖)
                         if temp_same_sex >= 3 and temp_opp_sex <= 1:
-                            # 1. 자리에 앉는 본인이 피해자가 되는 경우
                             if disadvantage_history[p_uid] >= 2:
                                 p_penalty += 100000
-                            # 2. 본인이 앉음으로써, 이미 앉아있는 사람을 피해자로 만드는 경우
-                            for seated in round_tables[t_idx]:
-                                if seated['성별'] == p_sex and disadvantage_history[seated['고유ID']] >= 2:
-                                    p_penalty += 100000
+                                    
+                        if t_idx in person_visited_tables[p_uid]: 
+                            p_penalty += 8000
 
                         if temp_w > max_w: p_penalty += 100000
                         if temp_m > max_m: p_penalty += 100000
@@ -374,7 +382,11 @@ if uploaded_file is not None:
                 grade_stats_str = " / ".join([f"{grade} {count}명 ({(count/total_count)*100:.1f}%)" for grade, count in grade_counts.items()])
                 st.info(f"🎓 **학년별 비율:** {grade_stats_str}")
         
-        df['매칭키'] = df['이름'].astype(str) + df['성별'].astype(str) + df['재학중인대학'].astype(str)
+        # [클로드 피드백 반영] 전화번호가 없는 사람은 0000 충돌 방지를 위해 기본 키로 분기
+        df['매칭키_기본'] = df['이름'].astype(str) + df['성별'].astype(str) + df['재학중인대학'].astype(str)
+        df['매칭키_상세'] = df['매칭키_기본'] + df['전화번호'].apply(extract_phone_last4)
+        df['매칭키'] = df.apply(lambda r: r['매칭키_상세'] if extract_phone_last4(r['전화번호']) != '0000' else r['매칭키_기본'], axis=1)
+        
         past_keys = set()
         if past_waitlist_file is not None:
             if past_waitlist_file.name.endswith('.csv'): df_past = pd.read_csv(past_waitlist_file)
@@ -386,6 +398,7 @@ if uploaded_file is not None:
 
                 if '소속학교' in df_past.columns and '재학중인대학' not in df_past.columns: df_past.rename(columns={'소속학교': '재학중인대학'}, inplace=True)
                 if '학교' in df_past.columns and '재학중인대학' not in df_past.columns: df_past.rename(columns={'학교': '재학중인대학'}, inplace=True)
+                if '연락처' in df_past.columns and '전화번호' not in df_past.columns: df_past.rename(columns={'연락처': '전화번호'}, inplace=True)
                 
                 if '성별' in df_past.columns: df_past['성별'] = df_past['성별'].apply(normalize_gender)
                 if '재학중인대학' in df_past.columns: df_past['재학중인대학'] = df_past['재학중인대학'].apply(normalize_univ)
@@ -393,7 +406,13 @@ if uploaded_file is not None:
                 
                 df_past = df_past[(df_past['성별'].isin(['남', '여'])) & (df_past['재학중인대학'] != '미기재')]
                 
-                df_past['매칭키'] = df_past['이름'].astype(str) + df_past['성별'].astype(str) + df_past['재학중인대학'].astype(str)
+                df_past['매칭키_기본'] = df_past['이름'].astype(str) + df_past['성별'].astype(str) + df_past['재학중인대학'].astype(str)
+                if '전화번호' in df_past.columns:
+                    df_past['매칭키_상세'] = df_past['매칭키_기본'] + df_past['전화번호'].apply(extract_phone_last4)
+                    df_past['매칭키'] = df_past.apply(lambda r: r['매칭키_상세'] if extract_phone_last4(r['전화번호']) != '0000' else r['매칭키_기본'], axis=1)
+                else:
+                    df_past['매칭키'] = df_past['매칭키_기본']
+                    
                 past_keys = set(df_past['매칭키'].dropna().tolist())
                 st.success(f"✅ 저번 대기자 {len(past_keys)}명을 성공적으로 인식했습니다. (우선 선발 대상)")
             except Exception as e:
@@ -513,7 +532,7 @@ if uploaded_file is not None:
         def to_excel(df_to_save):
             output = io.BytesIO()
             with pd.ExcelWriter(output) as writer:
-                df_to_save.drop(columns=['매칭키', '우선순위', '고유ID'], errors='ignore').to_excel(writer, index=False, sheet_name='Sheet1')
+                df_to_save.drop(columns=['매칭키', '매칭키_기본', '매칭키_상세', '우선순위', '고유ID'], errors='ignore').to_excel(writer, index=False, sheet_name='Sheet1')
             return output.getvalue()
 
         if 'selected_df' in st.session_state:
@@ -527,7 +546,7 @@ if uploaded_file is not None:
             st.info(f"👥 **선발된 인원 참여이력 비율:** 🌟 신규 {new_sel}명 / 🎖️ 기존(크루) {crew_sel}명")
             
             st.write("### ✅ 최종 참가 확정 명단")
-            st.dataframe(sel_df.drop(columns=['매칭키', '우선순위', '고유ID'], errors='ignore'), hide_index=True, use_container_width=True)
+            st.dataframe(sel_df.drop(columns=['매칭키', '매칭키_기본', '매칭키_상세', '우선순위', '고유ID'], errors='ignore'), hide_index=True, use_container_width=True)
             st.download_button(label="📥 최종 참가자 명단 엑셀 다운로드", data=to_excel(sel_df), file_name='파티_최종참가자명단.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
             
             if len(wait_df) > 0:
@@ -539,7 +558,7 @@ if uploaded_file is not None:
                 st.info(f"👥 **대기자 참여이력 비율:** 🌟 신규 {new_wait}명 / 🎖️ 기존(크루) {crew_wait}명")
                 
                 st.write("### ⏳ 대기자 명단 (미선정자)")
-                st.dataframe(wait_df.drop(columns=['매칭키', '우선순위', '고유ID'], errors='ignore'), hide_index=True, use_container_width=True)
+                st.dataframe(wait_df.drop(columns=['매칭키', '매칭키_기본', '매칭키_상세', '우선순위', '고유ID'], errors='ignore'), hide_index=True, use_container_width=True)
                 st.download_button(label="📥 대기자 명단 엑셀 다운로드", data=to_excel(wait_df), file_name='파티_대기자명단.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
             st.write("---")
@@ -554,12 +573,9 @@ if uploaded_file is not None:
                 
                 sel_list = st.session_state['selected_df'].to_dict('records')
                 
-                key_to_uid = {}
-                for p in sel_list: 
-                    matching_key = f"{p['이름']}_{p['재학중인대학']}_{p['성별']}"
-                    key_to_uid[matching_key] = p['고유ID']
-                    
                 past_met_pairs = set()
+                key_to_uid = {}
+                
                 if past_seat_file is not None:
                     try:
                         df_ps = pd.read_csv(past_seat_file) if past_seat_file.name.endswith('.csv') else pd.read_excel(past_seat_file)
@@ -573,13 +589,31 @@ if uploaded_file is not None:
                             df_ps.rename(columns={'학교': '재학중인대학'}, inplace=True)
                         elif '소속학교' in df_ps.columns and '재학중인대학' not in df_ps.columns:
                             df_ps.rename(columns={'소속학교': '재학중인대학'}, inplace=True)
+                        if '연락처' in df_ps.columns and '전화번호' not in df_ps.columns:
+                            df_ps.rename(columns={'연락처': '전화번호'}, inplace=True)
                             
                         if '성별' in df_ps.columns: df_ps['성별'] = df_ps['성별'].apply(normalize_gender)
                         if '재학중인대학' in df_ps.columns: df_ps['재학중인대학'] = df_ps['재학중인대학'].apply(normalize_univ)
                         if '학년' in df_ps.columns: df_ps['학년'] = df_ps['학년'].apply(normalize_grade)
                             
+                        has_phone_in_ps = '전화번호' in df_ps.columns
+                        
+                        for p in sel_list: 
+                            p_phone = extract_phone_last4(p.get('전화번호', '0000'))
+                            if has_phone_in_ps and p_phone != '0000':
+                                matching_key = f"{p['이름']}_{p['재학중인대학']}_{p['성별']}_{p_phone}"
+                            else:
+                                matching_key = f"{p['이름']}_{p['재학중인대학']}_{p['성별']}"
+                            key_to_uid[matching_key] = p['고유ID']
+                            
                         round_cols = [c for c in df_ps.columns if '라운드' in c or 'R' in c]
-                        df_ps['매칭키'] = df_ps['이름'].astype(str) + "_" + df_ps['재학중인대학'].astype(str) + "_" + df_ps['성별'].astype(str)
+                        
+                        df_ps['매칭키_기본'] = df_ps['이름'].astype(str) + "_" + df_ps['재학중인대학'].astype(str) + "_" + df_ps['성별'].astype(str)
+                        if has_phone_in_ps:
+                            df_ps['매칭키_상세'] = df_ps['매칭키_기본'] + "_" + df_ps['전화번호'].apply(extract_phone_last4)
+                            df_ps['매칭키'] = df_ps.apply(lambda r: r['매칭키_상세'] if extract_phone_last4(r.get('전화번호', '0000')) != '0000' else r['매칭키_기본'], axis=1)
+                        else:
+                            df_ps['매칭키'] = df_ps['매칭키_기본']
                         
                         for r_col in round_cols:
                             for table_name, group in df_ps.groupby(r_col):
@@ -590,9 +624,13 @@ if uploaded_file is not None:
                                         if p1_key in key_to_uid and p2_key in key_to_uid:
                                             past_met_pairs.add(tuple(sorted([key_to_uid[p1_key], key_to_uid[p2_key]])))
                         
-                        st.success(f"✅ 과거 이력 스캔 성공! 총 {len(past_met_pairs)}개의 '과거 만남 기록'을 이번 파티에서 원천 차단합니다.")
+                        st.success(f"✅ 과거 이력 스캔 성공! 총 {len(past_met_pairs)}개의 '과거 만남 기록'을 파악했습니다.")
                     except Exception as e:
                         st.warning(f"⚠️ 과거 자리배치표 파싱 오류 (컬럼명을 확인해주세요): {e}")
+                else:
+                    for p in sel_list:
+                        matching_key = f"{p['이름']}_{p['재학중인대학']}_{p['성별']}"
+                        key_to_uid[matching_key] = p['고유ID']
                 
                 all_rounds_data, final_score = generate_full_schedule(
                     sel_list, 
